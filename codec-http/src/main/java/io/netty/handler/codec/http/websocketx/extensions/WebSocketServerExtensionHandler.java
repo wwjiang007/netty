@@ -15,6 +15,8 @@
  */
 package io.netty.handler.codec.http.websocketx.extensions;
 
+import static io.netty.util.internal.ObjectUtil.checkNonEmpty;
+
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
@@ -25,7 +27,6 @@ import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
-import io.netty.util.internal.ObjectUtil;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -56,11 +57,7 @@ public class WebSocketServerExtensionHandler extends ChannelDuplexHandler {
      *      with fallback configuration.
      */
     public WebSocketServerExtensionHandler(WebSocketServerExtensionHandshaker... extensionHandshakers) {
-        ObjectUtil.checkNotNull(extensionHandshakers, "extensionHandshakers");
-        if (extensionHandshakers.length == 0) {
-            throw new IllegalArgumentException("extensionHandshakers must contains at least one handshaker");
-        }
-        this.extensionHandshakers = Arrays.asList(extensionHandshakers);
+        this.extensionHandshakers = Arrays.asList(checkNonEmpty(extensionHandshakers, "extensionHandshakers"));
     }
 
     @Override
@@ -124,13 +121,13 @@ public class WebSocketServerExtensionHandler extends ChannelDuplexHandler {
 
             if (validExtensions != null) {
                 String headerValue = headers.getAsString(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS);
-
+                List<WebSocketExtensionData> extraExtensions =
+                  new ArrayList<WebSocketExtensionData>(extensionHandshakers.size());
                 for (WebSocketServerExtension extension : validExtensions) {
-                    WebSocketExtensionData extensionData = extension.newReponseData();
-                    headerValue = WebSocketExtensionUtil.appendExtension(headerValue,
-                        extensionData.name(),
-                        extensionData.parameters());
+                    extraExtensions.add(extension.newReponseData());
                 }
+                String newHeaderValue = WebSocketExtensionUtil
+                  .computeMergeExtensionsHeaderValue(headerValue, extraExtensions);
                 promise.addListener(new ChannelFutureListener() {
                     @Override
                     public void operationComplete(ChannelFuture future) {
@@ -147,8 +144,8 @@ public class WebSocketServerExtensionHandler extends ChannelDuplexHandler {
                     }
                 });
 
-                if (headerValue != null) {
-                    headers.set(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS, headerValue);
+                if (newHeaderValue != null) {
+                    headers.set(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS, newHeaderValue);
                 }
             }
 

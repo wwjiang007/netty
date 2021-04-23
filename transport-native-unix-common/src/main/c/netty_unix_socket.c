@@ -39,6 +39,11 @@
 #define SO_REUSEPORT 15
 #endif /* SO_REUSEPORT */
 
+// MSG_FASTOPEN is defined in linux 3.6. We define this here so older kernels can compile.
+#ifndef MSG_FASTOPEN
+#define MSG_FASTOPEN 0x20000000
+#endif
+
 static jclass datagramSocketAddressClass = NULL;
 static jmethodID datagramSocketAddrMethodId = NULL;
 static jmethodID inetSocketAddrMethodId = NULL;
@@ -309,7 +314,7 @@ int netty_unix_socket_initSockaddr(JNIEnv* env, jboolean ipv6, jbyteArray addres
     return 0;
 }
 
-static jint _sendTo(JNIEnv* env, jint fd, jboolean ipv6, void* buffer, jint pos, jint limit, jbyteArray address, jint scopeId, jint port) {
+static jint _sendTo(JNIEnv* env, jint fd, jboolean ipv6, void* buffer, jint pos, jint limit, jbyteArray address, jint scopeId, jint port, jint flags) {
     struct sockaddr_storage addr;
     socklen_t addrSize;
     if (netty_unix_socket_initSockaddr(env, ipv6, address, scopeId, port, &addr, &addrSize) == -1) {
@@ -319,7 +324,7 @@ static jint _sendTo(JNIEnv* env, jint fd, jboolean ipv6, void* buffer, jint pos,
     ssize_t res;
     int err;
     do {
-       res = sendto(fd, buffer + pos, (size_t) (limit - pos), 0, (struct sockaddr*) &addr, addrSize);
+       res = sendto(fd, buffer + pos, (size_t) (limit - pos), flags, (struct sockaddr*) &addr, addrSize);
        // keep on writing if it was interrupted
     } while (res == -1 && ((err = errno) == EINTR));
 
@@ -334,43 +339,9 @@ static jobject _recvFrom(JNIEnv* env, jint fd, void* buffer, jint pos, jint limi
     socklen_t addrlen = sizeof(addr);
     ssize_t res;
     int err;
-    jobject local = NULL;
-
-#ifdef IP_RECVORIGDSTADDR
-    struct sockaddr_storage daddr;
-    struct iovec iov;
-    struct cmsghdr* cmsg;
-    struct msghdr msg;
-    char cntrlbuf[64];
-
-    int readLocalAddr;
-    if (netty_unix_socket_getOption(env, fd, IPPROTO_IP, IP_RECVORIGDSTADDR,
-            &readLocalAddr, sizeof(readLocalAddr)) < 0) {
-        readLocalAddr = 0;
-    }
-
-    if (readLocalAddr) {
-        iov.iov_base = buffer + pos;
-        iov.iov_len  = (size_t) (limit - pos);
-        msg.msg_name = (struct sockaddr*) &addr;
-        msg.msg_namelen = addrlen;
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = cntrlbuf;
-        msg.msg_controllen = sizeof(cntrlbuf);
-    }
-#endif
 
     do {
-#ifdef IP_RECVORIGDSTADDR
-        if (readLocalAddr) {
-            res = recvmsg(fd, &msg, 0);
-        } else {
-#endif
-            res = recvfrom(fd, buffer + pos, (size_t) (limit - pos), 0, (struct sockaddr*) &addr, &addrlen);
-#ifdef IP_RECVORIGDSTADDR
-        }
-#endif
+        res = recvfrom(fd, buffer + pos, (size_t) (limit - pos), 0, (struct sockaddr*) &addr, &addrlen);
         // Keep on reading if we was interrupted
     } while (res == -1 && ((err = errno) == EINTR));
 
@@ -391,24 +362,7 @@ static jobject _recvFrom(JNIEnv* env, jint fd, void* buffer, jint pos, jint limi
         return NULL;
     }
 
-#ifdef IP_RECVORIGDSTADDR
-#if !defined(SOL_IP) && defined(IPPROTO_IP)
-#define SOL_IP IPPROTO_IP
-#endif /* !SOL_IP && IPPROTO_IP */
-    if (readLocalAddr) {
-        for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-            if (cmsg->cmsg_level == SOL_IP && cmsg->cmsg_type == IP_RECVORIGDSTADDR) {
-                memcpy (&daddr, CMSG_DATA(cmsg), sizeof (struct sockaddr_storage));
-                local = createDatagramSocketAddress(env, &daddr, res, NULL);
-                if (local == NULL) {
-                    return NULL;
-                }
-                break;
-            }
-        }
-    }
-#endif
-    return createDatagramSocketAddress(env, &addr, res, local);
+    return createDatagramSocketAddress(env, &addr, res, NULL);
 }
 
 void netty_unix_socket_getOptionHandleError(JNIEnv* env, int err) {
@@ -623,16 +577,16 @@ static jint netty_unix_socket_newSocketDomainFd(JNIEnv* env, jclass clazz) {
     return fd;
 }
 
-static jint netty_unix_socket_sendTo(JNIEnv* env, jclass clazz, jint fd, jboolean ipv6, jobject jbuffer, jint pos, jint limit, jbyteArray address, jint scopeId, jint port) {
+static jint netty_unix_socket_sendTo(JNIEnv* env, jclass clazz, jint fd, jboolean ipv6, jobject jbuffer, jint pos, jint limit, jbyteArray address, jint scopeId, jint port, jint flags) {
     // We check that GetDirectBufferAddress will not return NULL in OnLoad
-    return _sendTo(env, fd, ipv6, (*env)->GetDirectBufferAddress(env, jbuffer), pos, limit, address, scopeId, port);
+    return _sendTo(env, fd, ipv6, (*env)->GetDirectBufferAddress(env, jbuffer), pos, limit, address, scopeId, port, flags);
 }
 
-static jint netty_unix_socket_sendToAddress(JNIEnv* env, jclass clazz, jint fd, jboolean ipv6, jlong memoryAddress, jint pos, jint limit, jbyteArray address, jint scopeId, jint port) {
-    return _sendTo(env, fd, ipv6, (void *) (intptr_t) memoryAddress, pos, limit, address, scopeId, port);
+static jint netty_unix_socket_sendToAddress(JNIEnv* env, jclass clazz, jint fd, jboolean ipv6, jlong memoryAddress, jint pos, jint limit, jbyteArray address, jint scopeId, jint port, jint flags) {
+    return _sendTo(env, fd, ipv6, (void *) (intptr_t) memoryAddress, pos, limit, address, scopeId, port, flags);
 }
 
-static jint netty_unix_socket_sendToAddresses(JNIEnv* env, jclass clazz, jint fd, jboolean ipv6, jlong memoryAddress, jint length, jbyteArray address, jint scopeId, jint port) {
+static jint netty_unix_socket_sendToAddresses(JNIEnv* env, jclass clazz, jint fd, jboolean ipv6, jlong memoryAddress, jint length, jbyteArray address, jint scopeId, jint port, jint flags) {
     struct sockaddr_storage addr;
     socklen_t addrSize;
     if (netty_unix_socket_initSockaddr(env, ipv6, address, scopeId, port, &addr, &addrSize) == -1) {
@@ -648,7 +602,7 @@ static jint netty_unix_socket_sendToAddresses(JNIEnv* env, jclass clazz, jint fd
     ssize_t res;
     int err;
     do {
-       res = sendmsg(fd, &m, 0);
+       res = sendmsg(fd, &m, flags);
        // keep on writing if it was interrupted
     } while (res == -1 && ((err = errno) == EINTR));
 
@@ -965,6 +919,9 @@ static jint netty_unix_socket_isBroadcast(JNIEnv* env, jclass clazz, jint fd) {
     return optval;
 }
 
+static jint netty_unit_socket_msgFastopen(JNIEnv* env, jclass clazz) {
+    return MSG_FASTOPEN;
+}
 
 // JNI Registered Methods End
 
@@ -982,9 +939,9 @@ static const JNINativeMethod fixed_method_table[] = {
   { "newSocketDgramFd", "(Z)I", (void *) netty_unix_socket_newSocketDgramFd },
   { "newSocketStreamFd", "(Z)I", (void *) netty_unix_socket_newSocketStreamFd },
   { "newSocketDomainFd", "()I", (void *) netty_unix_socket_newSocketDomainFd },
-  { "sendTo", "(IZLjava/nio/ByteBuffer;II[BII)I", (void *) netty_unix_socket_sendTo },
-  { "sendToAddress", "(IZJII[BII)I", (void *) netty_unix_socket_sendToAddress },
-  { "sendToAddresses", "(IZJI[BII)I", (void *) netty_unix_socket_sendToAddresses },
+  { "sendTo", "(IZLjava/nio/ByteBuffer;II[BIII)I", (void *) netty_unix_socket_sendTo },
+  { "sendToAddress", "(IZJII[BIII)I", (void *) netty_unix_socket_sendToAddress },
+  { "sendToAddresses", "(IZJI[BIII)I", (void *) netty_unix_socket_sendToAddresses },
   // "recvFrom" has a dynamic signature
   // "recvFromAddress" has a dynamic signature
   { "recvFd", "(I)I", (void *) netty_unix_socket_recvFd },
@@ -1012,7 +969,8 @@ static const JNINativeMethod fixed_method_table[] = {
   { "getSoError", "(I)I", (void *) netty_unix_socket_getSoError },
   { "initialize", "(Z)V", (void *) netty_unix_socket_initialize },
   { "isIPv6Preferred", "()Z", (void *) netty_unix_socket_isIPv6Preferred },
-  { "isIPv6", "(I)Z", (void *) netty_unix_socket_isIPv6 }
+  { "isIPv6", "(I)Z", (void *) netty_unix_socket_isIPv6 },
+  { "msgFastopen", "()I", (void *) netty_unit_socket_msgFastopen }
 };
 static const jint fixed_method_table_size = sizeof(fixed_method_table) / sizeof(fixed_method_table[0]);
 

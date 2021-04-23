@@ -15,6 +15,8 @@
  */
 package io.netty.handler.stream;
 
+import static io.netty.util.internal.ObjectUtil.checkPositive;
+
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -81,10 +83,7 @@ public class ChunkedWriteHandler extends ChannelDuplexHandler {
      */
     @Deprecated
     public ChunkedWriteHandler(int maxPendingWrites) {
-        if (maxPendingWrites <= 0) {
-            throw new IllegalArgumentException(
-                    "maxPendingWrites: " + maxPendingWrites + " (expected: > 0)");
-        }
+        checkPositive(maxPendingWrites, "maxPendingWrites");
     }
 
     @Override
@@ -261,11 +260,14 @@ public class ChunkedWriteHandler extends ChannelDuplexHandler {
                     message = Unpooled.EMPTY_BUFFER;
                 }
 
+                if (endOfInput) {
+                    // We need to remove the element from the queue before we call writeAndFlush() as this operation
+                    // may cause an action that also touches the queue.
+                    queue.remove();
+                }
                 // Flush each chunk to conserve memory
                 ChannelFuture f = ctx.writeAndFlush(message);
                 if (endOfInput) {
-                    queue.remove();
-
                     if (f.isDone()) {
                         handleEndOfInputFuture(f, currentWrite);
                     } else {

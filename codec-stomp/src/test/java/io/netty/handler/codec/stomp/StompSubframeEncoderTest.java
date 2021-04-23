@@ -76,9 +76,7 @@ public class StompSubframeEncoderTest {
 
         channel.writeOutbound(frame);
 
-        ByteBuf headers = channel.readOutbound();
-        ByteBuf content = channel.readOutbound();
-        ByteBuf fullFrame = Unpooled.wrappedBuffer(headers, content);
+        ByteBuf fullFrame = channel.readOutbound();
         assertEquals(SEND_FRAME_UTF8, fullFrame.toString(CharsetUtil.UTF_8));
         assertTrue(fullFrame.release());
     }
@@ -96,18 +94,5 @@ public class StompSubframeEncoderTest {
         assertNull(channel.readOutbound());
         assertEquals("CONNECTED\nversion:1.2\n\n\0", stompBuffer.toString(CharsetUtil.UTF_8));
         assertTrue(stompBuffer.release());
-    }
-
-    @Test
-    public void testEncodeHeartbeatFrame() {
-        StompFrame heartbeatFrame = new DefaultStompFrame(StompCommand.HEARTBEAT);
-
-        assertTrue(channel.writeOutbound(heartbeatFrame));
-
-        ByteBuf stompBuffer = channel.readOutbound();
-        assertNotNull(stompBuffer);
-        assertEquals("\n", stompBuffer.toString(CharsetUtil.UTF_8));
-
-        assertNull(channel.readOutbound());
     }
 }

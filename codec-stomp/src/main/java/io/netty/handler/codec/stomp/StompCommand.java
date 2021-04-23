@@ -28,10 +28,11 @@ public enum StompCommand {
     ACK,
     NACK,
     BEGIN,
+    ABORT,
+    COMMIT,
     DISCONNECT,
     MESSAGE,
     RECEIPT,
     ERROR,
-    HEARTBEAT, // not an actual STOMP command, but used for 'heart-beat' functionality
     UNKNOWN
 }
