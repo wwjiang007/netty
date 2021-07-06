@@ -63,7 +63,7 @@ public class JdkOpenSslEngineInteroptTest extends SSLEngineTest {
 
     @BeforeClass
     public static void checkOpenSsl() {
-        assumeTrue(OpenSsl.isAvailable());
+        OpenSsl.ensureAvailability();
     }
 
     @Override
@@ -155,6 +155,35 @@ public class JdkOpenSslEngineInteroptTest extends SSLEngineTest {
     public void testSessionLocalWhenNonMutualWithKeyManager() throws Exception {
         checkShouldUseKeyManagerFactory();
         super.testSessionLocalWhenNonMutualWithKeyManager();
+    }
+
+    @Override
+    public void testSessionLocalWhenNonMutualWithoutKeyManager() throws Exception {
+        // This only really works when the KeyManagerFactory is supported as otherwise we not really know when
+        // we need to provide a cert.
+        assumeTrue(OpenSsl.supportsKeyManagerFactory());
+        super.testSessionLocalWhenNonMutualWithoutKeyManager();
+    }
+
+    @Override
+    @Test
+    public void testSessionCache() throws Exception {
+        assumeTrue(OpenSsl.isSessionCacheSupported());
+        super.testSessionCache();
+    }
+
+    @Override
+    @Test
+    public void testSessionCacheTimeout() throws Exception {
+        assumeTrue(OpenSsl.isSessionCacheSupported());
+        super.testSessionCacheTimeout();
+    }
+
+    @Override
+    @Test
+    public void testSessionCacheSize() throws Exception {
+        assumeTrue(OpenSsl.isSessionCacheSupported());
+        super.testSessionCacheSize();
     }
 
     @Override

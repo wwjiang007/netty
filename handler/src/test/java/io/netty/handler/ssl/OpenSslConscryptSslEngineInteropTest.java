@@ -57,7 +57,7 @@ public class OpenSslConscryptSslEngineInteropTest extends ConscryptSslEngineTest
 
     @BeforeClass
     public static void checkOpenssl() {
-        assumeTrue(OpenSsl.isAvailable());
+        OpenSsl.ensureAvailability();
     }
 
     @Override
@@ -141,6 +141,27 @@ public class OpenSslConscryptSslEngineInteropTest extends ConscryptSslEngineTest
     public void testSessionLocalWhenNonMutualWithKeyManager() throws Exception {
         checkShouldUseKeyManagerFactory();
         super.testSessionLocalWhenNonMutualWithKeyManager();
+    }
+
+    @Override
+    @Test
+    public void testSessionCache() throws Exception {
+        assumeTrue(OpenSsl.isSessionCacheSupported());
+        super.testSessionCache();
+    }
+
+    @Override
+    @Test
+    public void testSessionCacheTimeout() throws Exception {
+        assumeTrue(OpenSsl.isSessionCacheSupported());
+        super.testSessionCacheTimeout();
+    }
+
+    @Override
+    @Test
+    public void testSessionCacheSize() throws Exception {
+        assumeTrue(OpenSsl.isSessionCacheSupported());
+        super.testSessionCacheSize();
     }
 
     @Override

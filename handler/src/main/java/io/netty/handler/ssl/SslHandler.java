@@ -1258,9 +1258,12 @@ public class SslHandler extends ByteToMessageDecoder implements ChannelOutboundH
                 ctx.fireUserEventTriggered(new SslHandshakeCompletionEvent(cause));
             }
 
-            // We need to flush one time as there may be an alert that we should send to the remote peer because
-            // of the SSLException reported here.
-            wrapAndFlush(ctx);
+            // Let's check if the handler was removed in the meantime and so pendingUnencryptedWrites is null.
+            if (pendingUnencryptedWrites != null) {
+                // We need to flush one time as there may be an alert that we should send to the remote peer because
+                // of the SSLException reported here.
+                wrapAndFlush(ctx);
+            }
         } catch (SSLException ex) {
             logger.debug("SSLException during trying to call SSLEngine.wrap(...)" +
                     " because of an previous SSLException, ignoring...", ex);
@@ -1503,13 +1506,18 @@ public class SslHandler extends ByteToMessageDecoder implements ChannelOutboundH
         return executor instanceof EventExecutor && ((EventExecutor) executor).inEventLoop();
     }
 
-    private static void runAllDelegatedTasks(SSLEngine engine) {
+    private static void runAllDelegatedTasks(SSLEngine engine, Runnable completeTask) {
         for (;;) {
             Runnable task = engine.getDelegatedTask();
             if (task == null) {
                 return;
             }
-            task.run();
+            if (task instanceof AsyncRunnable) {
+                ((AsyncRunnable) task).run(completeTask);
+            } else {
+                task.run();
+                completeTask.run();
+            }
         }
     }
 
@@ -1521,14 +1529,8 @@ public class SslHandler extends ByteToMessageDecoder implements ChannelOutboundH
      * more tasks to process.
      */
     private boolean runDelegatedTasks(boolean inUnwrap) {
-        if (delegatedTaskExecutor == ImmediateExecutor.INSTANCE || inEventLoop(delegatedTaskExecutor)) {
-            // We should run the task directly in the EventExecutor thread and not offload at all.
-            runAllDelegatedTasks(engine);
-            return true;
-        } else {
-            executeDelegatedTasks(inUnwrap);
-            return false;
-        }
+        executeDelegatedTasks(inUnwrap);
+        return false;
     }
 
     private void executeDelegatedTasks(boolean inUnwrap) {
@@ -1690,18 +1692,20 @@ public class SslHandler extends ByteToMessageDecoder implements ChannelOutboundH
         @Override
         public void run() {
             try {
-                runAllDelegatedTasks(engine);
-
-                // All tasks were processed.
-                assert engine.getHandshakeStatus() != HandshakeStatus.NEED_TASK;
-
-                // Jump back on the EventExecutor.
-                ctx.executor().execute(new Runnable() {
+                runAllDelegatedTasks(engine, new Runnable() {
                     @Override
                     public void run() {
-                        resumeOnEventExecutor();
+                        // All tasks were processed.
+                        // Jump back on the EventExecutor.
+                        ctx.executor().execute(new Runnable() {
+                            @Override
+                            public void run() {
+                                resumeOnEventExecutor();
+                            }
+                        });
                     }
                 });
+
             } catch (final Throwable cause) {
                 handleException(cause);
             }

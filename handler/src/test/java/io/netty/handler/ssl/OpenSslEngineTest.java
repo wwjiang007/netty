@@ -38,6 +38,7 @@ import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
 import javax.net.ssl.SSLEngineResult.HandshakeStatus;
 import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.X509ExtendedKeyManager;
 import java.net.Socket;
@@ -71,6 +72,7 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.junit.Assume.assumeTrue;
 
 @RunWith(Parameterized.class)
@@ -108,7 +110,7 @@ public class OpenSslEngineTest extends SSLEngineTest {
 
     @BeforeClass
     public static void checkOpenSsl() {
-        assumeTrue(OpenSsl.isAvailable());
+       OpenSsl.ensureAvailability();
     }
 
     @Override
@@ -1319,6 +1321,7 @@ public class OpenSslEngineTest extends SSLEngineTest {
 
     @Test(expected = SSLException.class)
     public void testNoKeyFound() throws Exception {
+        checkShouldUseKeyManagerFactory();
         clientSslCtx = wrapContext(SslContextBuilder
                 .forClient()
                 .trustManager(InsecureTrustManagerFactory.INSTANCE)
@@ -1382,6 +1385,67 @@ public class OpenSslEngineTest extends SSLEngineTest {
     }
 
     @Override
+    public void testSessionLocalWhenNonMutualWithoutKeyManager() throws Exception {
+        // This only really works when the KeyManagerFactory is supported as otherwise we not really know when
+        // we need to provide a cert.
+        assumeTrue(OpenSsl.supportsKeyManagerFactory());
+        super.testSessionLocalWhenNonMutualWithoutKeyManager();
+    }
+
+    @Test
+    public void testDefaultTLS1NotAcceptedByDefaultServer() throws Exception {
+        testDefaultTLS1NotAcceptedByDefault(null, PROTOCOL_TLS_V1);
+    }
+
+    @Test
+    public void testDefaultTLS11NotAcceptedByDefaultServer() throws Exception {
+        testDefaultTLS1NotAcceptedByDefault(null, PROTOCOL_TLS_V1_1);
+    }
+
+    @Test
+    public void testDefaultTLS1NotAcceptedByDefaultClient() throws Exception {
+        testDefaultTLS1NotAcceptedByDefault(PROTOCOL_TLS_V1, null);
+    }
+
+    @Test
+    public void testDefaultTLS11NotAcceptedByDefaultClient() throws Exception {
+        testDefaultTLS1NotAcceptedByDefault(PROTOCOL_TLS_V1_1, null);
+    }
+
+    private void testDefaultTLS1NotAcceptedByDefault(String clientProtocol, String serverProtocol) throws Exception {
+        SslContextBuilder clientCtxBuilder = SslContextBuilder.forClient()
+                .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                .sslProvider(sslClientProvider())
+                .sslContextProvider(clientSslContextProvider());
+        if (clientProtocol != null) {
+            clientCtxBuilder.protocols(clientProtocol);
+        }
+        clientSslCtx = wrapContext(clientCtxBuilder.build());
+        SelfSignedCertificate ssc = new SelfSignedCertificate();
+
+        SslContextBuilder serverCtxBuilder = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
+                .sslProvider(sslServerProvider())
+                .sslContextProvider(serverSslContextProvider());
+        if (serverProtocol != null) {
+            serverCtxBuilder.protocols(serverProtocol);
+        }
+        serverSslCtx = wrapContext(serverCtxBuilder.build());
+        SSLEngine client = wrapEngine(clientSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT));
+        SSLEngine server = wrapEngine(serverSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT));
+
+        try {
+            handshake(client, server);
+            fail();
+        } catch (SSLHandshakeException expected) {
+            // expected
+        } finally {
+            cleanupClientSslEngine(client);
+            cleanupServerSslEngine(server);
+            ssc.delete();
+        }
+    }
+
+    @Override
     protected SslProvider sslClientProvider() {
         return SslProvider.OPENSSL;
     }
@@ -1425,12 +1489,27 @@ public class OpenSslEngineTest extends SSLEngineTest {
         return context;
     }
 
-    @Test
     @Override
+    @Test
     public void testSessionCache() throws Exception {
+        assumeTrue(OpenSsl.isSessionCacheSupported());
         super.testSessionCache();
         assertSessionContext(clientSslCtx);
         assertSessionContext(serverSslCtx);
+    }
+
+    @Override
+    @Test
+    public void testSessionCacheTimeout() throws Exception {
+        assumeTrue(OpenSsl.isSessionCacheSupported());
+        super.testSessionCacheTimeout();
+    }
+
+    @Override
+    @Test
+    public void testSessionCacheSize() throws Exception {
+        assumeTrue(OpenSsl.isSessionCacheSupported());
+        super.testSessionCacheSize();
     }
 
     private static void assertSessionContext(SslContext context) {

@@ -23,14 +23,18 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.CodecException;
 import io.netty.handler.codec.DecoderException;
+import io.netty.handler.codec.compression.Brotli;
 import io.netty.handler.codec.compression.ZlibCodecFactory;
 import io.netty.handler.codec.compression.ZlibDecoder;
 import io.netty.handler.codec.compression.ZlibEncoder;
 import io.netty.handler.codec.compression.ZlibWrapper;
 import io.netty.util.CharsetUtil;
 import io.netty.util.ReferenceCountUtil;
-import org.junit.Test;
+import io.netty.util.internal.PlatformDependent;
+import org.apache.commons.io.IOUtils;
+import org.junit.jupiter.api.Test;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
@@ -40,7 +44,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 public class HttpContentDecoderTest {
     private static final String HELLO_WORLD = "hello, world";
@@ -48,6 +58,29 @@ public class HttpContentDecoderTest {
             31, -117, 8, 8, 12, 3, -74, 84, 0, 3, 50, 0, -53, 72, -51, -55, -55,
             -41, 81, 40, -49, 47, -54, 73, 1, 0, 58, 114, -85, -1, 12, 0, 0, 0
     };
+    private static final String SAMPLE_STRING;
+    private static final byte[] SAMPLE_BZ_BYTES;
+
+    static {
+        InputStream uncompressed = HttpContentDecoderTest.class.getClassLoader()
+          .getResourceAsStream("sample.json");
+        try {
+            SAMPLE_STRING = IOUtils.toString(uncompressed, CharsetUtil.UTF_8);
+        } catch (Throwable e) {
+            throw new ExceptionInInitializerError(e);
+        } finally {
+            IOUtils.closeQuietly(uncompressed, null);
+        }
+        InputStream compressed = HttpContentDecoderTest.class.getClassLoader()
+          .getResourceAsStream("sample.json.br");
+        try {
+            SAMPLE_BZ_BYTES = IOUtils.toByteArray(compressed);
+        } catch (Throwable e) {
+            throw new ExceptionInInitializerError(e);
+        } finally {
+            IOUtils.closeQuietly(compressed, null);
+        }
+    }
 
     @Test
     public void testBinaryDecompression() throws Exception {
@@ -115,13 +148,13 @@ public class HttpContentDecoderTest {
         assertThat(ob1, is(instanceOf(DefaultHttpResponse.class)));
 
         Object ob2 = channel.readInbound();
-        assertThat(ob1, is(instanceOf(DefaultHttpResponse.class)));
+        assertThat(ob2, is(instanceOf(HttpContent.class)));
         HttpContent content = (HttpContent) ob2;
         assertEquals(HELLO_WORLD, content.content().toString(CharsetUtil.US_ASCII));
         content.release();
 
         Object ob3 = channel.readInbound();
-        assertThat(ob1, is(instanceOf(DefaultHttpResponse.class)));
+        assertThat(ob3, is(instanceOf(LastHttpContent.class)));
         LastHttpContent lastContent = (LastHttpContent) ob3;
         assertNotNull(lastContent.decoderResult());
         assertTrue(lastContent.decoderResult().isSuccess());
@@ -152,6 +185,83 @@ public class HttpContentDecoderTest {
         FullHttpResponse resp = (FullHttpResponse) o;
         assertEquals(HELLO_WORLD.length(), resp.headers().getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
         assertEquals(HELLO_WORLD, resp.content().toString(CharsetUtil.US_ASCII));
+        resp.release();
+
+        assertHasInboundMessages(channel, false);
+        assertHasOutboundMessages(channel, false);
+        assertFalse(channel.finish()); // assert that no messages are left in channel
+    }
+
+    @Test
+    public void testResponseBrotliDecompression() throws Throwable {
+        Brotli.ensureAvailability();
+        // Failing on windows atm
+        assumeFalse(PlatformDependent.isWindows());
+        HttpResponseDecoder decoder = new HttpResponseDecoder();
+        HttpContentDecoder decompressor = new HttpContentDecompressor();
+        HttpObjectAggregator aggregator = new HttpObjectAggregator(Integer.MAX_VALUE);
+        EmbeddedChannel channel = new EmbeddedChannel(decoder, decompressor, aggregator);
+
+        String headers = "HTTP/1.1 200 OK\r\n" +
+          "Content-Length: " + SAMPLE_BZ_BYTES.length + "\r\n" +
+          "Content-Encoding: br\r\n" +
+          "\r\n";
+        ByteBuf buf = Unpooled.wrappedBuffer(headers.getBytes(CharsetUtil.US_ASCII), SAMPLE_BZ_BYTES);
+        assertTrue(channel.writeInbound(buf));
+
+        Object o = channel.readInbound();
+        assertThat(o, is(instanceOf(FullHttpResponse.class)));
+        FullHttpResponse resp = (FullHttpResponse) o;
+        assertNull(resp.headers().get(HttpHeaderNames.CONTENT_ENCODING), "Content-Encoding header should be removed");
+        assertEquals(SAMPLE_STRING.length(),
+          resp.headers().getInt(HttpHeaderNames.CONTENT_LENGTH).intValue(),
+          "Content-Length header should match uncompressed string's length");
+        assertEquals(SAMPLE_STRING, resp.content().toString(CharsetUtil.UTF_8),
+          "Response body should match uncompressed string");
+        resp.release();
+
+        assertHasInboundMessages(channel, false);
+        assertHasOutboundMessages(channel, false);
+        assertFalse(channel.finish()); // assert that no messages are left in channel
+    }
+
+    @Test
+    public void testResponseChunksBrotliDecompression() throws Throwable {
+        Brotli.ensureAvailability();
+        // Failing on windows atm
+        assumeFalse(PlatformDependent.isWindows());
+        HttpResponseDecoder decoder = new HttpResponseDecoder();
+        HttpContentDecoder decompressor = new HttpContentDecompressor();
+        HttpObjectAggregator aggregator = new HttpObjectAggregator(Integer.MAX_VALUE);
+        EmbeddedChannel channel = new EmbeddedChannel(decoder, decompressor, aggregator);
+
+        String headers = "HTTP/1.1 200 OK\r\n" +
+          "Content-Length: " + SAMPLE_BZ_BYTES.length + "\r\n" +
+          "Content-Encoding: br\r\n" +
+          "\r\n";
+
+        assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(headers.getBytes(CharsetUtil.US_ASCII))));
+
+        int offset = 0;
+        while (offset < SAMPLE_BZ_BYTES.length) {
+            int len = Math.min(1500, SAMPLE_BZ_BYTES.length - offset);
+            boolean available = channel.writeInbound(Unpooled.wrappedBuffer(SAMPLE_BZ_BYTES, offset, len));
+            offset += 1500;
+            if (offset < SAMPLE_BZ_BYTES.length) {
+                assertFalse(available);
+            } else {
+                assertTrue(available);
+            }
+        }
+
+        Object o = channel.readInbound();
+        assertThat(o, is(instanceOf(FullHttpResponse.class)));
+        FullHttpResponse resp = (FullHttpResponse) o;
+        assertEquals(SAMPLE_STRING.length(),
+          resp.headers().getInt(HttpHeaderNames.CONTENT_LENGTH).intValue(),
+          "Content-Length header should match uncompressed string's length");
+        assertEquals(SAMPLE_STRING, resp.content().toString(CharsetUtil.UTF_8),
+          "Response body should match uncompressed string");
         resp.release();
 
         assertHasInboundMessages(channel, false);
@@ -404,11 +514,11 @@ public class HttpContentDecoderTest {
         assertThat(o, is(instanceOf(HttpResponse.class)));
         HttpResponse r = (HttpResponse) o;
 
-        assertFalse("Content-Length header not removed.", r.headers().contains(HttpHeaderNames.CONTENT_LENGTH));
+        assertFalse(r.headers().contains(HttpHeaderNames.CONTENT_LENGTH), "Content-Length header not removed.");
 
         String transferEncoding = r.headers().get(HttpHeaderNames.TRANSFER_ENCODING);
-        assertNotNull("Content-length as well as transfer-encoding not set.", transferEncoding);
-        assertEquals("Unexpected transfer-encoding value.", HttpHeaderValues.CHUNKED.toString(), transferEncoding);
+        assertNotNull(transferEncoding, "Content-length as well as transfer-encoding not set.");
+        assertEquals(HttpHeaderValues.CHUNKED.toString(), transferEncoding, "Unexpected transfer-encoding value.");
 
         assertHasInboundMessages(channel, true);
         assertHasOutboundMessages(channel, false);

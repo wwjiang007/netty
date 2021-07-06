@@ -53,7 +53,6 @@ import org.conscrypt.OpenSSLProvider;
 import org.junit.After;
 import org.junit.Assume;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -526,6 +525,7 @@ public abstract class SSLEngineTest {
     @Test(expected = SSLHandshakeException.class)
     public void testIncompatibleCiphers() throws Exception {
         assumeTrue(SslProvider.isTlsv13Supported(sslClientProvider()));
+        assumeTrue(SslProvider.isTlsv13Supported(sslServerProvider()));
 
         SelfSignedCertificate ssc = new SelfSignedCertificate();
         // Select a mandatory cipher from the TLSv1.2 RFC https://www.ietf.org/rfc/rfc5246.txt so handshakes won't fail
@@ -594,7 +594,7 @@ public abstract class SSLEngineTest {
         // Client trusts server but server only trusts itself
         mySetupMutualAuth(serverCrtFile, serverKeyFile, serverCrtFile, serverKeyPassword,
                           serverCrtFile, clientKeyFile, clientCrtFile, clientKeyPassword);
-        assertTrue(serverLatch.await(2, TimeUnit.SECONDS));
+        assertTrue(serverLatch.await(10, TimeUnit.SECONDS));
         assertTrue(serverException instanceof SSLHandshakeException);
     }
 
@@ -609,7 +609,7 @@ public abstract class SSLEngineTest {
         // Server trusts client but client only trusts itself
         mySetupMutualAuth(clientCrtFile, serverKeyFile, serverCrtFile, serverKeyPassword,
                           clientCrtFile, clientKeyFile, clientCrtFile, clientKeyPassword);
-        assertTrue(clientLatch.await(2, TimeUnit.SECONDS));
+        assertTrue(clientLatch.await(10, TimeUnit.SECONDS));
         assertTrue(clientException instanceof SSLHandshakeException);
     }
 
@@ -654,7 +654,7 @@ public abstract class SSLEngineTest {
 
         mySetupMutualAuth(serverKeyManagerFactory, commonCertChain, clientKeyManagerFactory, commonCertChain,
                 auth, false, false);
-        assertTrue(clientLatch.await(5, TimeUnit.SECONDS));
+        assertTrue(clientLatch.await(10, TimeUnit.SECONDS));
         assertNull(clientException);
         assertTrue(serverLatch.await(5, TimeUnit.SECONDS));
         assertNull(serverException);
@@ -681,7 +681,7 @@ public abstract class SSLEngineTest {
 
         mySetupMutualAuth(serverKeyManagerFactory, commonCertChain, clientKeyManagerFactory, commonCertChain,
                           auth, true, serverInitEngine);
-        assertTrue(clientLatch.await(5, TimeUnit.SECONDS));
+        assertTrue(clientLatch.await(10, TimeUnit.SECONDS));
         assertTrue("unexpected exception: " + clientException,
                 mySetupMutualAuthServerIsValidClientException(clientException));
         assertTrue(serverLatch.await(5, TimeUnit.SECONDS));
@@ -844,25 +844,25 @@ public abstract class SSLEngineTest {
     }
 
     @Test
-    public void testClientHostnameValidationSuccess() throws InterruptedException, SSLException {
+    public void testClientHostnameValidationSuccess() throws Exception {
         mySetupClientHostnameValidation(ResourcesUtil.getFile(getClass(),  "localhost_server.pem"),
                                         ResourcesUtil.getFile(getClass(), "localhost_server.key"),
                                         ResourcesUtil.getFile(getClass(), "mutual_auth_ca.pem"),
                                         false);
-        assertTrue(clientLatch.await(5, TimeUnit.SECONDS));
+        assertTrue(clientLatch.await(10, TimeUnit.SECONDS));
         assertNull(clientException);
         assertTrue(serverLatch.await(5, TimeUnit.SECONDS));
         assertNull(serverException);
     }
 
     @Test
-    public void testClientHostnameValidationFail() throws InterruptedException, SSLException {
+    public void testClientHostnameValidationFail() throws Exception {
         Future<Void> clientWriteFuture =
             mySetupClientHostnameValidation(ResourcesUtil.getFile(getClass(),  "notlocalhost_server.pem"),
                                             ResourcesUtil.getFile(getClass(), "notlocalhost_server.key"),
                                             ResourcesUtil.getFile(getClass(), "mutual_auth_ca.pem"),
                                             true);
-        assertTrue(clientLatch.await(5, TimeUnit.SECONDS));
+        assertTrue(clientLatch.await(10, TimeUnit.SECONDS));
         assertTrue("unexpected exception: " + clientException,
                 mySetupMutualAuthServerIsValidClientException(clientException));
         assertTrue(serverLatch.await(5, TimeUnit.SECONDS));
@@ -1217,7 +1217,7 @@ public abstract class SSLEngineTest {
                                                MessageReceiver receiver) throws Exception {
         List<ByteBuf> dataCapture = null;
         try {
-            assertTrue(sendChannel.writeAndFlush(message).await(5, TimeUnit.SECONDS));
+            assertTrue(sendChannel.writeAndFlush(message).await(10, TimeUnit.SECONDS));
             receiverLatch.await(5, TimeUnit.SECONDS);
             message.resetReaderIndex();
             ArgumentCaptor<ByteBuf> captor = ArgumentCaptor.forClass(ByteBuf.class);
@@ -1365,8 +1365,7 @@ public abstract class SSLEngineTest {
     }
 
     @Test(timeout = 30000)
-    public void clientInitiatedRenegotiationWithFatalAlertDoesNotInfiniteLoopServer()
-            throws CertificateException, SSLException, InterruptedException, ExecutionException {
+    public void clientInitiatedRenegotiationWithFatalAlertDoesNotInfiniteLoopServer() throws Exception {
         assumeTrue(PlatformDependent.javaVersion() >= 11);
         final SelfSignedCertificate ssc = new SelfSignedCertificate();
         serverSslCtx = wrapContext(SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
@@ -2040,6 +2039,15 @@ public abstract class SSLEngineTest {
         }
     }
 
+    private String[] nonContiguousProtocols(SslProvider provider) {
+        if (provider != null) {
+            // conscrypt not correctly filters out TLSv1 and TLSv1.1 which is required now by the JDK.
+            // https://github.com/google/conscrypt/issues/1013
+            return new String[] { PROTOCOL_TLS_V1_2 };
+        }
+        return new String[] {PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1};
+    }
+
     @Test
     public void testHandshakeCompletesWithNonContiguousProtocolsTLSv1_2CipherOnly() throws Exception {
         SelfSignedCertificate ssc = new SelfSignedCertificate();
@@ -2049,14 +2057,14 @@ public abstract class SSLEngineTest {
         clientSslCtx = wrapContext(SslContextBuilder.forClient()
                 .trustManager(InsecureTrustManagerFactory.INSTANCE)
                 .ciphers(Collections.singletonList(sharedCipher))
-                .protocols(PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1)
+                .protocols(nonContiguousProtocols(sslClientProvider()))
                 .sslContextProvider(clientSslContextProvider())
                 .sslProvider(sslClientProvider())
                 .build());
 
         serverSslCtx = wrapContext(SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
                 .ciphers(Collections.singletonList(sharedCipher))
-                .protocols(PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1)
+                .protocols(nonContiguousProtocols(sslServerProvider()))
                 .sslContextProvider(serverSslContextProvider())
                 .sslProvider(sslServerProvider())
                 .build());
@@ -2082,14 +2090,14 @@ public abstract class SSLEngineTest {
         clientSslCtx = wrapContext(SslContextBuilder.forClient()
                 .trustManager(InsecureTrustManagerFactory.INSTANCE)
                 .ciphers(Collections.singletonList(sharedCipher), SupportedCipherSuiteFilter.INSTANCE)
-                .protocols(PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1)
+                .protocols(nonContiguousProtocols(sslClientProvider()))
                 .sslContextProvider(clientSslContextProvider())
                 .sslProvider(sslClientProvider())
                 .build());
 
         serverSslCtx = wrapContext(SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
                 .ciphers(Collections.singletonList(sharedCipher), SupportedCipherSuiteFilter.INSTANCE)
-                .protocols(PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1)
+                .protocols(nonContiguousProtocols(sslServerProvider()))
                 .sslContextProvider(serverSslContextProvider())
                 .sslProvider(sslServerProvider())
                 .build());
@@ -3897,7 +3905,7 @@ public abstract class SSLEngineTest {
         }
     }
 
-    private KeyManagerFactory newKeyManagerFactory(SelfSignedCertificate ssc)
+    private static KeyManagerFactory newKeyManagerFactory(SelfSignedCertificate ssc)
             throws UnrecoverableKeyException, KeyStoreException, NoSuchAlgorithmException,
             CertificateException, IOException {
         return SslContext.buildKeyManagerFactory(

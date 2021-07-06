@@ -112,6 +112,10 @@ public final class HttpHeaderValues {
      */
     public static final AsciiString GZIP = AsciiString.cached("gzip");
     /**
+     * {@code "br"}
+     */
+    public static final AsciiString BR = AsciiString.cached("br");
+    /**
      * {@code "gzip,deflate"}
      */
     public static final AsciiString GZIP_DEFLATE = AsciiString.cached("gzip,deflate");
@@ -231,7 +235,7 @@ public final class HttpHeaderValues {
     /**
      * {@code "XmlHttpRequest"}
      */
-    public static final AsciiString XML_HTTP_REQUEST = AsciiString.cached("XmlHttpRequest");
+    public static final AsciiString XML_HTTP_REQUEST = AsciiString.cached("XMLHttpRequest");
 
     private HttpHeaderValues() { }
 }

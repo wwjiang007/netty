@@ -19,6 +19,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.handler.ssl.util.LazyJavaxX509Certificate;
 import io.netty.handler.ssl.util.LazyX509Certificate;
+import io.netty.internal.tcnative.AsyncTask;
 import io.netty.internal.tcnative.Buffer;
 import io.netty.internal.tcnative.SSL;
 import io.netty.util.AbstractReferenceCounted;
@@ -74,8 +75,8 @@ import static io.netty.handler.ssl.SslUtils.PROTOCOL_TLS_V1_2;
 import static io.netty.handler.ssl.SslUtils.PROTOCOL_TLS_V1_3;
 import static io.netty.handler.ssl.SslUtils.SSL_RECORD_HEADER_LENGTH;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
-import static io.netty.util.internal.ObjectUtil.checkNotNullWithIAE;
 import static io.netty.util.internal.ObjectUtil.checkNotNullArrayParam;
+import static io.netty.util.internal.ObjectUtil.checkNotNullWithIAE;
 import static java.lang.Integer.MAX_VALUE;
 import static java.lang.Math.min;
 import static javax.net.ssl.SSLEngineResult.HandshakeStatus.FINISHED;
@@ -1032,15 +1033,13 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
 
     private SSLEngineResult newResultMayFinishHandshake(SSLEngineResult.HandshakeStatus hs,
                                                         int bytesConsumed, int bytesProduced) throws SSLException {
-        return newResult(mayFinishHandshake(hs != FINISHED ? getHandshakeStatus() : FINISHED),
-                         bytesConsumed, bytesProduced);
+        return newResult(mayFinishHandshake(hs, bytesConsumed, bytesProduced), bytesConsumed, bytesProduced);
     }
 
     private SSLEngineResult newResultMayFinishHandshake(SSLEngineResult.Status status,
                                                         SSLEngineResult.HandshakeStatus hs,
                                                         int bytesConsumed, int bytesProduced) throws SSLException {
-        return newResult(status, mayFinishHandshake(hs != FINISHED ? getHandshakeStatus() : FINISHED),
-                         bytesConsumed, bytesProduced);
+        return newResult(status, mayFinishHandshake(hs, bytesConsumed, bytesProduced), bytesConsumed, bytesProduced);
     }
 
     /**
@@ -1323,8 +1322,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         }
     }
 
-    private SSLEngineResult sslReadErrorResult(int error, int stackError, int bytesConsumed, int bytesProduced)
-            throws SSLException {
+    private boolean needWrapAgain(int stackError) {
         // Check if we have a pending handshakeException and if so see if we need to consume all pending data from the
         // BIO first or can just shutdown and throw it now.
         // This is needed so we ensure close_notify etc is correctly send to the remote peer.
@@ -1336,13 +1334,23 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
             SSLException exception = handshakeState == HandshakeState.FINISHED ?
                     new SSLException(message) : new SSLHandshakeException(message);
             if (pendingException == null) {
-               pendingException = exception;
+                pendingException = exception;
             } else {
                 ThrowableUtil.addSuppressed(pendingException, exception);
             }
             // We need to clear all errors so we not pick up anything that was left on the stack on the next
             // operation. Note that shutdownWithError(...) will cleanup the stack as well so its only needed here.
             SSL.clearError();
+            return true;
+        }
+        return false;
+    }
+
+    private SSLEngineResult sslReadErrorResult(int error, int stackError, int bytesConsumed, int bytesProduced)
+            throws SSLException {
+        if (needWrapAgain(stackError)) {
+            // There is something that needs to be send to the remote peer before we can teardown.
+            // This is most likely some alert.
             return new SSLEngineResult(OK, NEED_WRAP, bytesConsumed, bytesProduced);
         }
         throw shutdownWithError("SSL_read", error, stackError);
@@ -1429,6 +1437,48 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         }
     }
 
+    private class TaskDecorator<R extends Runnable> implements Runnable {
+        protected final R task;
+        TaskDecorator(R task) {
+            this.task = task;
+        }
+
+        @Override
+        public void run() {
+            if (isDestroyed()) {
+                // The engine was destroyed in the meantime, just return.
+                return;
+            }
+            try {
+                task.run();
+            } finally {
+                // The task was run, reset needTask to false so getHandshakeStatus() returns the correct value.
+                needTask = false;
+            }
+        }
+    }
+
+    private final class AsyncTaskDecorator extends TaskDecorator<AsyncTask> implements AsyncRunnable {
+        AsyncTaskDecorator(AsyncTask task) {
+            super(task);
+        }
+
+        @Override
+        public void run(Runnable runnable) {
+            if (isDestroyed()) {
+                // The engine was destroyed in the meantime, just return.
+                runnable.run();
+                return;
+            }
+            try {
+                task.runAsync(runnable);
+            } finally {
+                // The task was run, reset needTask to false so getHandshakeStatus() returns the correct value.
+                needTask = false;
+            }
+        }
+    }
+
     @Override
     public final synchronized Runnable getDelegatedTask() {
         if (isDestroyed()) {
@@ -1438,21 +1488,10 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         if (task == null) {
             return null;
         }
-        return new Runnable() {
-            @Override
-            public void run() {
-                if (isDestroyed()) {
-                    // The engine was destroyed in the meantime, just return.
-                    return;
-                }
-                try {
-                    task.run();
-                } finally {
-                    // The task was run, reset needTask to false so getHandshakeStatus() returns the correct value.
-                    needTask = false;
-                }
-            }
-        };
+        if (task instanceof AsyncTask) {
+            return new AsyncTaskDecorator((AsyncTask) task);
+        }
+        return new TaskDecorator<Runnable>(task);
     }
 
     @Override
@@ -1600,7 +1639,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                     SSL.setCipherSuites(ssl, cipherSuiteSpec, false);
                     if (OpenSsl.isTlsv13Supported()) {
                         // Set TLSv1.3 ciphers.
-                        SSL.setCipherSuites(ssl, cipherSuiteSpecTLSv13, true);
+                        SSL.setCipherSuites(ssl, OpenSsl.checkTls13Ciphers(logger, cipherSuiteSpecTLSv13), true);
                     }
 
                     // We also need to update the enabled protocols to ensure we disable the protocol if there are
@@ -1906,6 +1945,11 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                 return NEED_TASK;
             }
 
+            if (needWrapAgain(SSL.getLastErrorNumber())) {
+                // There is something that needs to be send to the remote peer before we can teardown.
+                // This is most likely some alert.
+                return NEED_WRAP;
+            }
             // Check if we have a pending exception that was created during the handshake and if so throw it after
             // shutdown the connection.
             if (pendingException != null) {
@@ -1925,6 +1969,12 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                 SSL.getTime(ssl) * 1000L, parentContext.sessionTimeout() * 1000L);
         selectApplicationProtocol();
         return FINISHED;
+    }
+
+    private SSLEngineResult.HandshakeStatus mayFinishHandshake(
+            SSLEngineResult.HandshakeStatus hs, int bytesConsumed, int bytesProduced) throws SSLException {
+        return hs == NEED_UNWRAP && bytesProduced > 0 || hs == NEED_WRAP && bytesConsumed > 0 ?
+            handshake() : mayFinishHandshake(hs != FINISHED ? getHandshakeStatus() : FINISHED);
     }
 
     private SSLEngineResult.HandshakeStatus mayFinishHandshake(SSLEngineResult.HandshakeStatus status)
