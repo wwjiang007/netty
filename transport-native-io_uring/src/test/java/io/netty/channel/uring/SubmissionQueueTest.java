@@ -44,12 +44,12 @@ public class SubmissionQueueTest {
 
             int counter = 0;
             while (submissionQueue.remaining() > 0) {
-                assertThat(submissionQueue.addNop((byte) 0, 1)).isNotZero();
+                submissionQueue.enqueueSqe(Native.IORING_OP_NOP, (byte) 0, (short) 0, -1, 0, 0, 0, 0,1, (short) 0, (short) 0, 0, 0);
                 counter++;
             }
             assertEquals(8, counter);
             assertEquals(8, submissionQueue.count());
-            assertThat(submissionQueue.addNop((byte) 0, 1)).isNotZero();
+            submissionQueue.enqueueSqe(Native.IORING_OP_NOP, (byte) 0, (short) 0, -1, 0, 0, 0, 0,1, (short) 0, (short) 0, 0, 0);
             assertEquals(1, submissionQueue.count());
             submissionQueue.submitAndWait();
             assertEquals(9, completionQueue.count());

@@ -221,18 +221,13 @@ public final class IoUringIoHandler implements IoHandler {
     }
 
     private void submitEventFdRead() {
-        SubmissionQueue submissionQueue = ringBuffer.ioUringSubmissionQueue();
-        long udata = UserData.encode(EVENTFD_ID, Native.IORING_OP_READ, (short) 0);
-
-        eventfdReadSubmitted = submissionQueue.addEventFdRead(
-                eventfd.intValue(), eventfdReadBuf, 0, 8, udata);
+        eventfdReadSubmitted = addEventFdRead(EVENTFD_ID,
+                eventfd.intValue(), eventfdReadBuf, 0, 8, (short) 0 );
     }
 
     private int submitAndWaitWithTimeout(SubmissionQueue submissionQueue,
                                          boolean linkTimeout, long timeoutNanoSeconds) {
         if (timeoutNanoSeconds != -1) {
-            long udata = UserData.encode(RINGFD_ID,
-                    linkTimeout ? Native.IORING_OP_LINK_TIMEOUT : Native.IORING_OP_TIMEOUT, (short) 0);
             // We use the same timespec pointer for all add*Timeout operations. This only works because we call
             // submit directly after it. This ensures the submitted timeout is considered "stable" and so can be reused.
             long seconds, nanoSeconds;
@@ -248,9 +243,9 @@ public final class IoUringIoHandler implements IoHandler {
             PlatformDependent.putLong(timeoutMemoryAddress + KERNEL_TIMESPEC_TV_NSEC_FIELD, nanoSeconds);
 
             if (linkTimeout) {
-                submissionQueue.addLinkTimeout(timeoutMemoryAddress, udata);
+                addLinkTimeout(RINGFD_ID, timeoutMemoryAddress, (short) 0);
             } else {
-                submissionQueue.addTimeout(timeoutMemoryAddress, udata);
+                addTimeout(RINGFD_ID, timeoutMemoryAddress, (short) 0);
             }
         }
         return submissionQueue.submitAndWait();
@@ -269,8 +264,7 @@ public final class IoUringIoHandler implements IoHandler {
         }
 
         // Ensure all previously submitted IOs get to complete before tearing down everything.
-        long udata = UserData.encode(RINGFD_ID, Native.IORING_OP_NOP, (short) 0);
-        submissionQueue.addNop((byte) Native.IOSQE_IO_DRAIN, udata);
+        addNop(RINGFD_ID, (byte) Native.IOSQE_IO_DRAIN, (short) 0 );
         submissionQueue.submit();
         while (completionQueue.hasCompletions()) {
             completionQueue.process(this::handle);
@@ -292,13 +286,12 @@ public final class IoUringIoHandler implements IoHandler {
             submissionQueue.submit();
         }
         // Try to drain all the IO from the queue first...
-        long udata = UserData.encode(RINGFD_ID, Native.IORING_OP_NOP, (short) 0);
         // We need to also specify the Native.IOSQE_LINK flag for it to work as otherwise it is not correctly linked
         // with the timeout.
         // See:
         // - https://man7.org/linux/man-pages/man2/io_uring_enter.2.html
         // - https://git.kernel.dk/cgit/liburing/commit/?h=link-timeout&id=bc1bd5e97e2c758d6fd975bd35843b9b2c770c5a
-        submissionQueue.addNop((byte) (Native.IOSQE_IO_DRAIN | Native.IOSQE_LINK), udata);
+        addNop(RINGFD_ID, (byte) (Native.IOSQE_IO_DRAIN | Native.IOSQE_LINK), (short) 0);
         // ... but only wait for 200 milliseconds on this
         submitAndWaitWithTimeout(submissionQueue, true, TimeUnit.MILLISECONDS.toNanos(200));
         completionQueue.process(this::handle);
@@ -346,8 +339,7 @@ public final class IoUringIoHandler implements IoHandler {
         // transition back to false, thus we should never have any more events written.
         // So, if we have a read event pending, we can cancel it.
         if (eventfdReadSubmitted != 0) {
-            long udata = UserData.encode(EVENTFD_ID, Native.IORING_OP_ASYNC_CANCEL, (short) 0);
-            submissionQueue.addCancel(eventfdReadSubmitted, udata);
+            addCancel(EVENTFD_ID, eventfdReadSubmitted, (short) 0);
             eventfdReadSubmitted = 0;
             submissionQueue.submit();
         }
@@ -525,6 +517,55 @@ public final class IoUringIoHandler implements IoHandler {
     @Override
     public boolean isCompatible(Class<? extends IoHandle> handleType) {
         return IoUringIoHandle.class.isAssignableFrom(handleType);
+    }
+
+    private long addNop(int id, byte flags, short data) {
+        long udata = UserData.encode(id, Native.IORING_OP_NOP, data);
+
+        // Mimic what liburing does:
+        // https://github.com/axboe/liburing/blob/liburing-2.8/src/include/liburing.h#L592
+        ringBuffer.ioUringSubmissionQueue().enqueueSqe(
+                Native.IORING_OP_NOP, flags, (short) 0, -1, 0, 0, 0, 0, udata,
+                (short) 0, (short) 0, 0, 0);
+        return udata;
+    }
+
+   private long addTimeout(int id, long timeoutMemoryAddress, short data) {
+        long udata = UserData.encode(id, Native.IORING_OP_TIMEOUT, data);
+        // Mimic what liburing does. We want to use a count of 1:
+        // https://github.com/axboe/liburing/blob/liburing-2.8/src/include/liburing.h#L599
+        ringBuffer.ioUringSubmissionQueue().enqueueSqe(
+                Native.IORING_OP_TIMEOUT, (byte) 0, (short) 0, -1, 1, timeoutMemoryAddress, 1,
+                0, udata, (short) 0, (short) 0, 0, 0);
+        return udata;
+    }
+
+    private long addLinkTimeout(int id, long timeoutMemoryAddress, short data) {
+        long udata = UserData.encode(id, Native.IORING_OP_LINK_TIMEOUT, data);
+        // Mimic what liburing does:
+        // https://github.com/axboe/liburing/blob/liburing-2.8/src/include/liburing.h#L687
+        ringBuffer.ioUringSubmissionQueue().enqueueSqe(
+                Native.IORING_OP_LINK_TIMEOUT, (byte) 0, (short) 0, -1, 1, timeoutMemoryAddress, 1,
+                0, udata, (short) 0, (short) 0, 0, 0);
+        return udata;
+    }
+
+    private long addEventFdRead(int id, int fd, long bufferAddress, int pos, int limit, short data) {
+        long udata = UserData.encode(id, Native.IORING_OP_READ, data);
+        ringBuffer.ioUringSubmissionQueue().enqueueSqe(
+                Native.IORING_OP_READ, (byte) 0, (short) 0, fd, 0, bufferAddress + pos, limit - pos,
+                0, udata, (short) 0, (short) 0, 0, 0);
+        return udata;
+    }
+
+    // Mimic what liburing does:
+    // https://github.com/axboe/liburing/blob/liburing-2.8/src/include/liburing.h#L673
+    private long addCancel(int id, long sqeToCancel, short data) {
+        long udata = UserData.encode(id, Native.IORING_OP_READ, data);
+        ringBuffer.ioUringSubmissionQueue().enqueueSqe(
+                Native.IORING_OP_ASYNC_CANCEL, (byte) 0, (short) 0, -1, 0, sqeToCancel, 0, 0,
+                udata, (short) 0, (short) 0, 0, 0);
+        return udata;
     }
 
     /**
